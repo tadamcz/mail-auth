@@ -152,7 +152,12 @@ where
 }
 
 #[cfg(test)]
-pub mod test {
+pub use self::local_cache::*;
+
+#[cfg(feature = "cli")]
+pub use self::local_cache::*;
+
+pub mod local_cache {
     use std::{
         borrow::Borrow,
         hash::Hash,
@@ -162,7 +167,7 @@ pub mod test {
 
     use crate::{MX, Parameters, ResolverCache, Txt, common::resolver::ToFqdn};
 
-    pub(crate) struct DummyCache<K, V>(std::sync::Mutex<std::collections::HashMap<K, V>>);
+    pub struct DummyCache<K, V>(std::sync::Mutex<std::collections::HashMap<K, V>>);
 
     impl<K: Hash + Eq, V: Clone> DummyCache<K, V> {
         pub fn new() -> Self {
@@ -192,7 +197,7 @@ pub mod test {
         }
     }
 
-    pub(crate) struct DummyCaches {
+    pub struct DummyCaches {
         pub txt: DummyCache<Box<str>, Txt>,
         pub mx: DummyCache<Box<str>, Arc<[MX]>>,
         pub ptr: DummyCache<IpAddr, Arc<[Box<str>]>>,

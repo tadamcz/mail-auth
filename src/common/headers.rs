@@ -29,7 +29,7 @@ pub(crate) struct ChainedHeaderIterator<'x, T: Iterator<Item = &'x [u8]>> {
     iter: HeaderIterator<'x>,
 }
 
-pub(crate) struct HeaderIterator<'x> {
+pub struct HeaderIterator<'x> {
     message: &'x [u8],
     iter: Peekable<Enumerate<Iter<'x, u8>>>,
     start_pos: usize,

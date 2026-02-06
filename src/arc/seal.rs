@@ -23,6 +23,22 @@ impl<T: SigningKey<Hasher = Sha256>> ArcSealer<T, Done> {
         results: &'x AuthenticationResults,
         arc_output: &ArcOutput,
     ) -> crate::Result<ArcSet<'x>> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.seal_at(message, results, arc_output, now)
+    }
+
+    /// Like `seal`, but uses the provided timestamp instead of the current time.
+    /// This is useful for producing deterministic output.
+    pub fn seal_at<'x>(
+        &self,
+        message: &'x AuthenticatedMessage<'x>,
+        results: &'x AuthenticationResults,
+        arc_output: &ArcOutput,
+        now: u64,
+    ) -> crate::Result<ArcSet<'x>> {
         if !arc_output.can_be_sealed() {
             return Err(Error::ArcInvalidCV);
         }
@@ -79,12 +95,6 @@ impl<T: SigningKey<Hasher = Sha256>> ArcSealer<T, Done> {
             );
             set.signature.bh = base64_encode(hash.as_ref())?;
         }
-
-        // Create Signature
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
 
         set.signature.t = now;
         set.signature.x = if set.signature.x > 0 {

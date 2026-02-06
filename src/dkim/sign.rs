@@ -43,7 +43,7 @@ impl<T: SigningKey> DkimSigner<T, Done> {
         )
     }
 
-    fn sign_stream<'x>(
+    pub fn sign_stream<'x>(
         &self,
         message: impl HeaderStream<'x>,
         now: u64,
