@@ -25,7 +25,7 @@ use mail_auth::{
     arc::ArcSealer,
     common::{
         crypto::{RsaKey, Sha256},
-        headers::{HeaderIterator, HeaderWriter},
+        headers::{HeaderIterator, HeaderWriter, Writable},
         parse::TxtRecordParser,
         resolver::ToFqdn,
         verify::{DomainKey, VerifySignature},
@@ -133,6 +133,18 @@ enum Commands {
         /// Path to DNS records file
         #[arg(long)]
         dns_file: String,
+    },
+
+    /// Canonicalize a message. Reads message from stdin, writes canonicalized message to stdout.
+    /// Useful for debugging: compare canonicalized output to see where implementations diverge.
+    Canonicalize {
+        /// Header canonicalization algorithm
+        #[arg(long, default_value = "relaxed")]
+        header_canon: Canon,
+
+        /// Body canonicalization algorithm
+        #[arg(long, default_value = "relaxed")]
+        body_canon: Canon,
     },
 }
 
@@ -479,6 +491,28 @@ async fn cmd_arc_verify(dns_file: &str) {
     }
 }
 
+fn cmd_canonicalize(header_canon: &Canon, body_canon: &Canon) {
+    let raw = read_stdin();
+    let message = normalize_crlf(&raw);
+
+    let ch: Canonicalization = header_canon.into();
+    let cb: Canonicalization = body_canon.into();
+
+    let mut header_iter = HeaderIterator::new(&message);
+    let headers: Vec<_> = (&mut header_iter).collect();
+    let body = header_iter
+        .body_offset()
+        .map(|pos| &message[pos..])
+        .unwrap_or_default();
+
+    let mut output: Vec<u8> = Vec::new();
+    ch.canonicalize_headers(headers.into_iter(), &mut output);
+    output.extend_from_slice(b"\r\n");
+    cb.canonical_body(body, 0).write(&mut output);
+
+    io::Write::write_all(&mut io::stdout(), &output).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -526,5 +560,10 @@ async fn main() {
         }
 
         Commands::ArcVerify { dns_file } => cmd_arc_verify(dns_file).await,
+
+        Commands::Canonicalize {
+            header_canon,
+            body_canon,
+        } => cmd_canonicalize(header_canon, body_canon),
     }
 }
