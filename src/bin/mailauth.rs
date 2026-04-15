@@ -25,7 +25,7 @@ use mail_auth::{
     Parameters, ReceivedSpf, ResolverCache, SpfOutput, SpfResult, Txt,
     arc::ArcSealer,
     common::{
-        crypto::{HashAlgorithm, RsaKey, Sha256},
+        crypto::{Ed25519Key, HashAlgorithm, RsaKey, Sha1, Sha256, SigningKey},
         headers::{HeaderIterator, HeaderWriter, Writable},
         parse::TxtRecordParser,
         resolver::ToFqdn,
@@ -37,7 +37,8 @@ use mail_auth::{
     report::{Feedback, Report, tlsrpt::TlsReport},
     spf::{Macro, Spf, verify::SpfParameters},
 };
-use rustls_pki_types::{PrivateKeyDer, PrivatePkcs1KeyDer, pem::PemObject};
+use rsa::{Pkcs1v15Sign, RsaPrivateKey, pkcs1::DecodeRsaPrivateKey, pkcs8::DecodePrivateKey};
+use rustls_pki_types::{PrivateKeyDer, pem::PemObject};
 use serde::de::DeserializeOwned;
 
 // ---------------------------------------------------------------------------
@@ -55,9 +56,13 @@ struct Cli {
 enum Commands {
     /// Sign a message with DKIM. Reads message from stdin, writes signed message to stdout.
     DkimSign {
-        /// Path to PEM-encoded RSA private key file.
+        /// Path to PEM-encoded private key file.
         #[arg(long)]
         key: String,
+
+        /// Signing algorithm.
+        #[arg(long, default_value = "rsa-sha256")]
+        algorithm: SignAlgorithm,
 
         /// Signing domain (d= tag).
         #[arg(long)]
@@ -124,9 +129,13 @@ enum Commands {
     /// Seal a message with ARC. Reads message from stdin, writes sealed message to stdout.
     /// Verifies existing DKIM/ARC chain, adds a new ARC set.
     ArcSeal {
-        /// Path to PEM-encoded RSA private key file.
+        /// Path to PEM-encoded private key file.
         #[arg(long)]
         key: String,
+
+        /// Signing algorithm.
+        #[arg(long, default_value = "rsa-sha256")]
+        algorithm: ArcSignAlgorithm,
 
         /// Signing domain (d= tag).
         #[arg(long)]
@@ -159,6 +168,22 @@ enum Commands {
         /// Path to DNS records file.
         #[arg(long)]
         dns_file: String,
+
+        /// Client IP address for ARC/IPREV/SPF/DMARC results embedded in AAR.
+        #[arg(long)]
+        ip: Option<IpAddr>,
+
+        /// SMTP HELO/EHLO domain for SPF/DMARC results embedded in AAR.
+        #[arg(long)]
+        helo_domain: Option<String>,
+
+        /// Hostname of the receiver performing SPF/DMARC checks embedded in AAR.
+        #[arg(long)]
+        host_domain: Option<String>,
+
+        /// SMTP MAIL FROM address for SPF/DMARC results embedded in AAR. May be empty.
+        #[arg(long, default_value = "")]
+        sender: String,
 
         /// Whether to parse the message strictly before sealing.
         #[arg(long, default_value_t = true, action = ArgAction::Set)]
@@ -354,6 +379,19 @@ enum HashAlg {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum SignAlgorithm {
+    RsaSha256,
+    RsaSha1,
+    Ed25519Sha256,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ArcSignAlgorithm {
+    RsaSha256,
+    Ed25519Sha256,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum SpfIdentity {
     Ehlo,
     MailFrom,
@@ -491,16 +529,71 @@ fn load_rsa_key(path: &str) -> RsaKey<Sha256> {
         eprintln!("Error reading key file '{path}': {e}");
         process::exit(2);
     });
-    RsaKey::<Sha256>::from_key_der(PrivateKeyDer::Pkcs1(
-        PrivatePkcs1KeyDer::from_pem_slice(pem.as_bytes()).unwrap_or_else(|e| {
-            eprintln!("Error parsing PEM key '{path}': {e}");
-            process::exit(2);
-        }),
-    ))
+    let key_der = PrivateKeyDer::from_pem_slice(pem.as_bytes()).unwrap_or_else(|e| {
+        eprintln!("Error parsing PEM key '{path}': {e}");
+        process::exit(2);
+    });
+    RsaKey::<Sha256>::from_key_der(key_der)
     .unwrap_or_else(|e| {
         eprintln!("Error loading RSA key '{path}': {e}");
         process::exit(2);
     })
+}
+
+struct CliRsaSha1Key(RsaPrivateKey);
+
+impl CliRsaSha1Key {
+    fn from_key_der(key_der: PrivateKeyDer<'_>) -> mail_auth::Result<Self> {
+        let inner = match key_der {
+            PrivateKeyDer::Pkcs1(der) => RsaPrivateKey::from_pkcs1_der(der.secret_pkcs1_der()),
+            PrivateKeyDer::Pkcs8(der) => RsaPrivateKey::from_pkcs8_der(der.secret_pkcs8_der()),
+            _ => return Err(mail_auth::Error::CryptoError("Unsupported RSA key format".to_string())),
+        }
+        .map_err(|err| mail_auth::Error::CryptoError(err.to_string()))?;
+
+        Ok(Self(inner))
+    }
+}
+
+impl SigningKey for CliRsaSha1Key {
+    type Hasher = Sha1;
+
+    fn sign(&self, input: impl Writable) -> mail_auth::Result<Vec<u8>> {
+        let hash = self.hash(input);
+        self.0
+            .sign(Pkcs1v15Sign::new::<sha1::Sha1>(), hash.as_ref())
+            .map_err(|err| mail_auth::Error::CryptoError(err.to_string()))
+    }
+
+    fn algorithm(&self) -> mail_auth::common::crypto::Algorithm {
+        mail_auth::common::crypto::Algorithm::RsaSha1
+    }
+}
+
+fn load_private_key_der(path: &str) -> PrivateKeyDer<'static> {
+    let pem = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("Error reading key file '{path}': {e}");
+        process::exit(2);
+    });
+    PrivateKeyDer::from_pem_slice(pem.as_bytes()).unwrap_or_else(|e| {
+        eprintln!("Error parsing PEM key '{path}': {e}");
+        process::exit(2);
+    })
+}
+
+fn load_ed25519_key(path: &str) -> Ed25519Key {
+    let key_der = load_private_key_der(path);
+    match key_der {
+        PrivateKeyDer::Pkcs8(der) => Ed25519Key::from_pkcs8_der(der.secret_pkcs8_der())
+            .unwrap_or_else(|e| {
+                eprintln!("Error loading Ed25519 key '{path}': {e}");
+                process::exit(2);
+            }),
+        _ => {
+            eprintln!("Error loading Ed25519 key '{path}': unsupported key format");
+            process::exit(2);
+        }
+    }
 }
 
 fn resolver() -> MessageAuthenticator {
@@ -870,12 +963,8 @@ fn dmarc_policy_name(policy: Policy) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Subcommand implementations
-// ---------------------------------------------------------------------------
-
-fn cmd_dkim_sign(
-    key_path: &str,
+fn dkim_sign_with_key<T: SigningKey>(
+    key: T,
     domain: &str,
     selector: &str,
     headers: &[String],
@@ -889,16 +978,10 @@ fn cmd_dkim_sign(
     header_canon: &Canon,
     body_canon: &Canon,
 ) {
-    if atps.is_none() && atpsh.is_some() {
-        eprintln!("Error: --atpsh requires --atps");
-        process::exit(2);
-    }
-
-    let pk = load_rsa_key(key_path);
     let raw = read_stdin();
     let message = normalize_crlf(&raw);
 
-    let mut signer = DkimSigner::from_key(pk)
+    let mut signer = DkimSigner::from_key(key)
         .domain(domain)
         .selector(selector)
         .headers(headers.iter().map(|s| s.as_str()))
@@ -935,6 +1018,143 @@ fn cmd_dkim_sign(
     io::Write::write_all(&mut io::stdout(), &message).unwrap();
 }
 
+async fn build_auth_results<'a, 'x>(
+    caches: &'x LocalCaches,
+    resolver: &MessageAuthenticator,
+    authenticated: &AuthenticatedMessage<'x>,
+    srv_id: &'a str,
+    ip: Option<IpAddr>,
+    helo_domain: Option<&str>,
+    host_domain: Option<&str>,
+    sender: &str,
+) -> (AuthenticationResults<'a>, mail_auth::ArcOutput<'x>) {
+    let dkim_result = resolver.verify_dkim(caches.parameters(authenticated)).await;
+    let arc_result = resolver.verify_arc(caches.parameters(authenticated)).await;
+    let mut auth_results = AuthenticationResults::new(srv_id).with_dkim_results(&dkim_result, srv_id);
+
+    if let Some(ip) = ip {
+        auth_results = auth_results.with_arc_result(&arc_result, ip);
+
+        let iprev_output = resolver.verify_iprev(caches.parameters(ip)).await;
+        auth_results = auth_results.with_iprev_result(&iprev_output, ip);
+
+        if let (Some(helo_domain), Some(host_domain)) = (helo_domain, host_domain) {
+            let spf_ehlo = resolver
+                .verify_spf(caches.parameters(SpfParameters::verify_ehlo(
+                    ip,
+                    helo_domain,
+                    host_domain,
+                )))
+                .await;
+            auth_results = auth_results.with_spf_ehlo_result(&spf_ehlo, ip, helo_domain);
+
+            let spf_mailfrom = resolver
+                .verify_spf(caches.parameters(SpfParameters::verify_mail_from(
+                    ip,
+                    helo_domain,
+                    host_domain,
+                    sender,
+                )))
+                .await;
+            auth_results = auth_results.with_spf_mailfrom_result(&spf_mailfrom, ip, sender, helo_domain);
+
+            let dmarc_output = resolver
+                .verify_dmarc(
+                    caches.parameters(
+                        DmarcParameters::new(
+                            authenticated,
+                            &dkim_result,
+                            sender.rsplit_once('@').map_or(helo_domain, |(_, domain)| domain),
+                            &spf_mailfrom,
+                        )
+                        .with_domain_suffix_fn(|domain| psl::domain_str(domain).unwrap_or(domain)),
+                    ),
+                )
+                .await;
+            auth_results = auth_results.with_dmarc_result(&dmarc_output);
+        }
+    }
+
+    (auth_results, arc_result)
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand implementations
+// ---------------------------------------------------------------------------
+
+fn cmd_dkim_sign(
+    key_path: &str,
+    algorithm: SignAlgorithm,
+    domain: &str,
+    selector: &str,
+    headers: &[String],
+    timestamp: u64,
+    auid: Option<&str>,
+    expire: Option<u64>,
+    body_length: bool,
+    reporting: bool,
+    atps: Option<&str>,
+    atpsh: Option<HashAlg>,
+    header_canon: &Canon,
+    body_canon: &Canon,
+) {
+    if atps.is_none() && atpsh.is_some() {
+        eprintln!("Error: --atpsh requires --atps");
+        process::exit(2);
+    }
+
+    match algorithm {
+        SignAlgorithm::RsaSha256 => dkim_sign_with_key(
+            load_rsa_key(key_path),
+            domain,
+            selector,
+            headers,
+            timestamp,
+            auid,
+            expire,
+            body_length,
+            reporting,
+            atps,
+            atpsh,
+            header_canon,
+            body_canon,
+        ),
+        SignAlgorithm::RsaSha1 => dkim_sign_with_key(
+            CliRsaSha1Key::from_key_der(load_private_key_der(key_path)).unwrap_or_else(|e| {
+                eprintln!("Error loading RSA key '{key_path}': {e}");
+                process::exit(2);
+            }),
+            domain,
+            selector,
+            headers,
+            timestamp,
+            auid,
+            expire,
+            body_length,
+            reporting,
+            atps,
+            atpsh,
+            header_canon,
+            body_canon,
+        ),
+        SignAlgorithm::Ed25519Sha256 => dkim_sign_with_key(
+            load_ed25519_key(key_path),
+            domain,
+            selector,
+            headers,
+            timestamp,
+            auid,
+            expire,
+            body_length,
+            reporting,
+            atps,
+            atpsh,
+            header_canon,
+            body_canon,
+        ),
+    }
+}
+
 async fn cmd_dkim_verify(dns_file: &str, strict: bool) {
     let caches = load_dns_caches(dns_file);
     let raw = read_stdin();
@@ -968,6 +1188,7 @@ async fn cmd_dkim_verify(dns_file: &str, strict: bool) {
 
 async fn cmd_arc_seal(
     key_path: &str,
+    algorithm: ArcSignAlgorithm,
     domain: &str,
     selector: &str,
     headers: &[String],
@@ -976,20 +1197,30 @@ async fn cmd_arc_seal(
     body_length: bool,
     srv_id: &str,
     dns_file: &str,
+    ip: Option<IpAddr>,
+    helo_domain: Option<&str>,
+    host_domain: Option<&str>,
+    sender: &str,
     strict: bool,
     header_canon: &Canon,
     body_canon: &Canon,
 ) {
-    let pk = load_rsa_key(key_path);
     let caches = load_dns_caches(dns_file);
     let raw = read_stdin();
     let message_bytes = normalize_crlf(&raw);
     let authenticated = parse_authenticated_message(&message_bytes, strict);
     let resolver = resolver();
-
-    let dkim_result = resolver.verify_dkim(caches.parameters(&authenticated)).await;
-    let arc_result = resolver.verify_arc(caches.parameters(&authenticated)).await;
-    let auth_results = AuthenticationResults::new(srv_id).with_dkim_results(&dkim_result, srv_id);
+    let (auth_results, arc_result) = build_auth_results(
+        &caches,
+        &resolver,
+        &authenticated,
+        srv_id,
+        ip,
+        helo_domain,
+        host_domain,
+        sender,
+    )
+    .await;
 
     if !arc_result.can_be_sealed() {
         eprintln!(
@@ -999,26 +1230,52 @@ async fn cmd_arc_seal(
         process::exit(1);
     }
 
-    let mut sealer = ArcSealer::from_key(pk)
-        .domain(domain)
-        .selector(selector)
-        .headers(headers.iter().map(|s| s.as_str()))
-        .header_canonicalization(header_canon.into())
-        .body_canonicalization(body_canon.into());
+    let arc_set = match algorithm {
+        ArcSignAlgorithm::RsaSha256 => {
+            let mut sealer = ArcSealer::from_key(load_rsa_key(key_path))
+                .domain(domain)
+                .selector(selector)
+                .headers(headers.iter().map(|s| s.as_str()))
+                .header_canonicalization(header_canon.into())
+                .body_canonicalization(body_canon.into());
 
-    if let Some(expire) = expire {
-        sealer = sealer.expiration(expire);
-    }
-    if body_length {
-        sealer = sealer.body_length(true);
-    }
+            if let Some(expire) = expire {
+                sealer = sealer.expiration(expire);
+            }
+            if body_length {
+                sealer = sealer.body_length(true);
+            }
 
-    let arc_set = sealer
-        .seal_at(&authenticated, &auth_results, &arc_result, timestamp)
-        .unwrap_or_else(|e| {
-            eprintln!("Error sealing message: {e}");
-            process::exit(1);
-        });
+            sealer
+                .seal_at(&authenticated, &auth_results, &arc_result, timestamp)
+                .unwrap_or_else(|e| {
+                    eprintln!("Error sealing message: {e}");
+                    process::exit(1);
+                })
+        }
+        ArcSignAlgorithm::Ed25519Sha256 => {
+            let mut sealer = ArcSealer::from_key(load_ed25519_key(key_path))
+                .domain(domain)
+                .selector(selector)
+                .headers(headers.iter().map(|s| s.as_str()))
+                .header_canonicalization(header_canon.into())
+                .body_canonicalization(body_canon.into());
+
+            if let Some(expire) = expire {
+                sealer = sealer.expiration(expire);
+            }
+            if body_length {
+                sealer = sealer.body_length(true);
+            }
+
+            sealer
+                .seal_at(&authenticated, &auth_results, &arc_result, timestamp)
+                .unwrap_or_else(|e| {
+                    eprintln!("Error sealing message: {e}");
+                    process::exit(1);
+                })
+        }
+    };
 
     print!("{}", arc_set.to_header());
     print!("{}", auth_results.to_header());
@@ -1174,54 +1431,17 @@ async fn cmd_auth_results(
     let message = normalize_crlf(&raw);
     let authenticated = parse_authenticated_message(&message, strict);
     let resolver = resolver();
-
-    let dkim_result = resolver.verify_dkim(caches.parameters(&authenticated)).await;
-    let arc_result = resolver.verify_arc(caches.parameters(&authenticated)).await;
-    let mut auth_results = AuthenticationResults::new(srv_id).with_dkim_results(&dkim_result, srv_id);
-
-    if let Some(ip) = ip {
-        auth_results = auth_results.with_arc_result(&arc_result, ip);
-
-        let iprev_output = resolver.verify_iprev(caches.parameters(ip)).await;
-        auth_results = auth_results.with_iprev_result(&iprev_output, ip);
-
-        if let (Some(helo_domain), Some(host_domain)) = (helo_domain, host_domain) {
-            let spf_ehlo = resolver
-                .verify_spf(caches.parameters(SpfParameters::verify_ehlo(
-                    ip,
-                    helo_domain,
-                    host_domain,
-                )))
-                .await;
-            auth_results = auth_results.with_spf_ehlo_result(&spf_ehlo, ip, helo_domain);
-
-            let spf_mailfrom = resolver
-                .verify_spf(caches.parameters(SpfParameters::verify_mail_from(
-                    ip,
-                    helo_domain,
-                    host_domain,
-                    sender,
-                )))
-                .await;
-            auth_results =
-                auth_results.with_spf_mailfrom_result(&spf_mailfrom, ip, sender, helo_domain);
-
-            let dmarc_output = resolver
-                .verify_dmarc(
-                    caches.parameters(
-                        DmarcParameters::new(
-                            &authenticated,
-                            &dkim_result,
-                            sender.rsplit_once('@').map_or(helo_domain, |(_, domain)| domain),
-                            &spf_mailfrom,
-                        )
-                        .with_domain_suffix_fn(|domain| psl::domain_str(domain).unwrap_or(domain)),
-                    ),
-                )
-                .await;
-            auth_results = auth_results.with_dmarc_result(&dmarc_output);
-        }
-    }
+    let (auth_results, _) = build_auth_results(
+        &caches,
+        &resolver,
+        &authenticated,
+        srv_id,
+        ip,
+        helo_domain,
+        host_domain,
+        sender,
+    )
+    .await;
 
     print!("{}", auth_results.to_header());
 }
@@ -1289,6 +1509,7 @@ async fn main() {
     match &cli.command {
         Commands::DkimSign {
             key,
+            algorithm,
             domain,
             selector,
             headers,
@@ -1303,6 +1524,7 @@ async fn main() {
             body_canon,
         } => cmd_dkim_sign(
             key,
+            *algorithm,
             domain,
             selector,
             headers,
@@ -1321,6 +1543,7 @@ async fn main() {
 
         Commands::ArcSeal {
             key,
+            algorithm,
             domain,
             selector,
             headers,
@@ -1329,6 +1552,10 @@ async fn main() {
             body_length,
             srv_id,
             dns_file,
+            ip,
+            helo_domain,
+            host_domain,
+            sender,
             strict,
             header_canon,
             body_canon,
@@ -1343,6 +1570,10 @@ async fn main() {
                 *body_length,
                 srv_id,
                 dns_file,
+                *ip,
+                helo_domain.as_deref(),
+                host_domain.as_deref(),
+                sender,
                 *strict,
                 header_canon,
                 body_canon,

@@ -22,7 +22,7 @@ required-features = ["cli"]
 
 [features]
 default = ["ring", "report"]
-cli = ["clap", "tokio/rt-multi-thread", "tokio/macros"]
+cli = ["clap", "tokio/rt-multi-thread", "tokio/macros", "dep:rsa", "dep:sha1"]
 generate = ["rsa", "rand"]
 report = ["quick-xml", "zip", "hashify"]
 test = []
@@ -38,6 +38,7 @@ quick-xml = { version = "0.39", optional = true }
 hashify =  { version = "0.2.7", optional = true }
 ring = { version = "0.17", optional = true }
 rsa = { version = "0.9.8", optional = true }
+sha1 = { version = "0.10", optional = true }
 rustls-pki-types = "1.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
