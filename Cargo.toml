@@ -22,11 +22,12 @@ required-features = ["cli"]
 
 [features]
 default = ["ring", "report"]
-cli = ["clap", "tokio/rt-multi-thread", "tokio/macros", "dep:rsa", "dep:sha1"]
-generate = ["dep:rsa", "dep:rand"]
+cli = ["clap", "tokio/rt-multi-thread", "tokio/macros", "rsa", "dep:sha1"]
+generate = ["rsa", "dep:rand"]
 report = ["quick-xml", "zip", "hashify"]
 test = []
 rkyv = ["dep:rkyv", "mail-parser/rkyv"]
+rsa = ["dep:rsa"]
 
 [dependencies]
 ahash = "0.8.0"
@@ -38,7 +39,7 @@ quick-xml = { version = "0.39", optional = true }
 hashify =  { version = "0.2.7", optional = true }
 ring = { version = "0.17", optional = true }
 rsa = { version = "0.9.8", optional = true }
-sha1 = { version = "0.10", optional = true }
+sha1 = { version = "0.10", features = ["oid"], optional = true }
 rustls-pki-types = "1.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

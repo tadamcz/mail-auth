@@ -545,11 +545,12 @@ struct CliRsaSha1Key(RsaPrivateKey);
 impl CliRsaSha1Key {
     fn from_key_der(key_der: PrivateKeyDer<'_>) -> mail_auth::Result<Self> {
         let inner = match key_der {
-            PrivateKeyDer::Pkcs1(der) => RsaPrivateKey::from_pkcs1_der(der.secret_pkcs1_der()),
-            PrivateKeyDer::Pkcs8(der) => RsaPrivateKey::from_pkcs8_der(der.secret_pkcs8_der()),
+            PrivateKeyDer::Pkcs1(der) => RsaPrivateKey::from_pkcs1_der(der.secret_pkcs1_der())
+                .map_err(|err| mail_auth::Error::CryptoError(err.to_string()))?,
+            PrivateKeyDer::Pkcs8(der) => RsaPrivateKey::from_pkcs8_der(der.secret_pkcs8_der())
+                .map_err(|err| mail_auth::Error::CryptoError(err.to_string()))?,
             _ => return Err(mail_auth::Error::CryptoError("Unsupported RSA key format".to_string())),
-        }
-        .map_err(|err| mail_auth::Error::CryptoError(err.to_string()))?;
+        };
 
         Ok(Self(inner))
     }
@@ -1021,7 +1022,7 @@ fn dkim_sign_with_key<T: SigningKey>(
 async fn build_auth_results<'a, 'x>(
     caches: &'x LocalCaches,
     resolver: &MessageAuthenticator,
-    authenticated: &AuthenticatedMessage<'x>,
+    authenticated: &'x AuthenticatedMessage<'x>,
     srv_id: &'a str,
     ip: Option<IpAddr>,
     helo_domain: Option<&str>,
@@ -1562,6 +1563,7 @@ async fn main() {
         } => {
             cmd_arc_seal(
                 key,
+                *algorithm,
                 domain,
                 selector,
                 headers,
