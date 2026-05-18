@@ -794,24 +794,16 @@ fn load_dns_caches(path: &str) -> LocalCaches {
                     eprintln!("Invalid SPF record line: {line}");
                     process::exit(2);
                 };
-                caches
-                    .txt
-                    .insert(name.to_fqdn(), Spf::parse(value.as_bytes()).unwrap_or_else(|e| {
-                        eprintln!("Error parsing SPF record for '{name}': {e}");
-                        process::exit(2);
-                    }).into(), valid_until);
+                let record: Txt = Spf::parse(value.as_bytes()).into();
+                caches.txt.insert(name.to_fqdn(), record, valid_until);
             }
             "exp" | "macro" => {
                 let Some((name, value)) = split_once_ws(rest) else {
                     eprintln!("Invalid SPF macro line: {line}");
                     process::exit(2);
                 };
-                caches
-                    .txt
-                    .insert(name.to_fqdn(), Macro::parse(value.as_bytes()).unwrap_or_else(|e| {
-                        eprintln!("Error parsing SPF macro for '{name}': {e}");
-                        process::exit(2);
-                    }).into(), valid_until);
+                let record: Txt = Macro::parse(value.as_bytes()).into();
+                caches.txt.insert(name.to_fqdn(), record, valid_until);
             }
             "dmarc" => {
                 let Some((name, value)) = split_once_ws(rest) else {
