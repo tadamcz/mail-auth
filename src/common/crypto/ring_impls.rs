@@ -279,7 +279,7 @@ impl VerifyingKey for Ed25519PublicKey {
         canonicalization.canonicalize_headers(headers, &mut hasher);
         self.inner
             .verify(hasher.complete().as_ref(), signature)
-            .map_err(|err| Error::CryptoError(err.to_string()))
+            .map_err(|_| Error::FailedVerification)
     }
 }
 
